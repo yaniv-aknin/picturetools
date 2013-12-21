@@ -46,12 +46,13 @@ def parse_arguments(argv):
     parser = argparse.ArgumentParser()
     parser.add_argument('--parallel', default=None, type=int)
     parser.add_argument('--size', default='1920x1200')
+    parser.add_argument('--overwrite', default=False, action='store_true')
     parser.add_argument('src')
     parser.add_argument('dst')
     options = parser.parse_args(argv[1:])
     if options.parallel is None:
         try:
-            options.parallel = multiprocessing.cpu_count()
+            options.parallel = max(1, int(multiprocessing.cpu_count()/2))
         except NotImplementedError:
             options.parallel = 1
     return options
@@ -114,8 +115,12 @@ def main(options):
         dst_dir = os.path.join(options.dst, os.path.relpath(src_dir, options.src))
         os.makedirs(os.path.join(options.dst, os.path.relpath(directory, options.src)))
         for filename in filenames:
+            src = os.path.join(src_dir, filename)
+            dst = os.path.join(dst_dir, filename)
+            if os.path.exists(dst) and not options.overwrite:
+                continue
             total += 1
-            work_queue.put((os.path.join(src_dir, filename), os.path.join(dst_dir, filename)))
+            work_queue.put(src, dst)
     report_queue.put(Estimate(total))
 
     work_queue.join()
