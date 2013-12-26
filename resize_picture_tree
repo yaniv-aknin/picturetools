@@ -6,6 +6,7 @@ import multiprocessing
 import os
 import sys
 import argparse
+import re
 from threading import Thread
 from Queue import Queue
 from subprocess import Popen, PIPE
@@ -47,6 +48,9 @@ def parse_arguments(argv):
     parser.add_argument('--parallel', default=None, type=int)
     parser.add_argument('--size', default='1920x1200')
     parser.add_argument('--overwrite', default=False, action='store_true')
+    parser.add_argument('--allow-existing', default=False, action='store_true')
+    parser.add_argument('--allow-whitelist', default='\.(jpg)$')
+    parser.add_argument('--allow-whitelist-case-sensitive', default=False, action='store_true')
     parser.add_argument('src')
     parser.add_argument('dst')
     options = parser.parse_args(argv[1:])
@@ -55,6 +59,10 @@ def parse_arguments(argv):
             options.parallel = max(1, int(multiprocessing.cpu_count()/2))
         except NotImplementedError:
             options.parallel = 1
+    if options.allow_whitelist_case_sensitive:
+        options.allow_whitelist = re.compile(options.allow_whitelist)
+    else:
+        options.allow_whitelist = re.compile(options.allow_whitelist, re.IGNORECASE)
     return options
 
 def convert_image(options, src, dst):
@@ -99,7 +107,7 @@ def reporter(options, report_queue):
         report_queue.task_done()
 
 def main(options):
-    if os.path.isdir(options.dst):
+    if not options.allow_existing and os.path.isdir(options.dst):
         raise SystemExit('refusing to use existing directory %s' % (options.dst,))
 
     work_queue = Queue()
@@ -113,18 +121,24 @@ def main(options):
     for directory, subdirectories, filenames in os.walk(options.src):
         src_dir = os.path.join(options.src, directory)
         dst_dir = os.path.join(options.dst, os.path.relpath(src_dir, options.src))
-        os.makedirs(os.path.join(options.dst, os.path.relpath(directory, options.src)))
         for filename in filenames:
+            if not options.allow_whitelist.match(filename):
+                continue
+            if not os.path.isdir(dst_dir):
+                os.makedirs(dst_dir)
             src = os.path.join(src_dir, filename)
             dst = os.path.join(dst_dir, filename)
             if os.path.exists(dst) and not options.overwrite:
                 continue
             total += 1
-            work_queue.put(src, dst)
+            work_queue.put((src, dst))
     report_queue.put(Estimate(total))
 
-    work_queue.join()
-    report_queue.join()
+    try:
+        work_queue.join()
+        report_queue.join()
+    except KeyboardInterrupt:
+        pass
 
 if __name__ == '__main__':
     main(parse_arguments(sys.argv))
