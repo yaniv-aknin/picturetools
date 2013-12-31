@@ -7,6 +7,7 @@ import os
 import sys
 import argparse
 import re
+import json
 from threading import Thread
 from Queue import Queue
 from subprocess import Popen, PIPE
@@ -20,11 +21,14 @@ class FileMessage(Message):
     def __init__(self, src, dst):
         self.src = src
         self.dst = dst
-    def __str__(self):
-        return '%s -> %s' % (self.src, self.dst)
 
 class Success(FileMessage):
-    pass
+    def __init__(self, src, dst, src_md5, dst_md5):
+        super(Success, self).__init__(src, dst)
+        self.src_md5 = src_md5
+        self.dst_md5 = dst_md5
+    def __str__(self):
+        return '%s (%s) -> %s (%s)' % (self.src, self.src_md5[:6], self.dst, self.dst_md5[:6])
     
 class Failure(FileMessage):
     def __init__(self, src, dst, error):
@@ -37,11 +41,11 @@ class Estimate(Message):
     def __init__(self, total):
         self.total = total
 
-class ConversionError(Exception):
-    def __init__(self, convert_stderr):
-        self.convert_stderr = convert_stderr
+class ToolError(Exception):
+    def __init__(self, tool_stderr):
+        self.tool_stderr = tool_stderr
     def __str__(self):
-        return self.convert_stderr
+        return self.tool_stderr
 
 def parse_arguments(argv):
     parser = argparse.ArgumentParser()
@@ -51,6 +55,7 @@ def parse_arguments(argv):
     parser.add_argument('--allow-existing', default=False, action='store_true')
     parser.add_argument('--allow-whitelist', default='\.(jpg)$')
     parser.add_argument('--allow-whitelist-case-sensitive', default=False, action='store_true')
+    parser.add_argument('--metadata-path', default='.metadata.json')
     parser.add_argument('src')
     parser.add_argument('dst')
     options = parser.parse_args(argv[1:])
@@ -63,13 +68,22 @@ def parse_arguments(argv):
         options.allow_whitelist = re.compile(options.allow_whitelist)
     else:
         options.allow_whitelist = re.compile(options.allow_whitelist, re.IGNORECASE)
+    if options.metadata_path and not os.path.isabs(options.metadata_path):
+        options.metadata_path = os.path.join(options.dst, options.metadata_path)
     return options
 
-def convert_image(options, src, dst):
-    process = Popen(['gm', 'convert', '-size', options.size, src, '-resize', options.size, dst], stdin=devnull, stdout=devnull, stderr=PIPE)
+def run_tool(args):
+    process = Popen(args, stdin=devnull, stdout=PIPE, stderr=PIPE)
     out, err = process.communicate()
     if process.wait() != 0:
-        raise ConversionError(err.strip())
+        raise ToolError(err.strip())
+    return out
+
+def convert_image(options, src, dst):
+    run_tool(['gm', 'convert', '-size', options.size, src, '-resize', options.size, dst])
+
+def get_file_md5(path):
+    return run_tool(['md5sum', path]).split()[0]
 
 def start_thread(func, *args, **kwargs):
     t = Thread(target=func, args=args, kwargs=kwargs)
@@ -82,13 +96,15 @@ def worker(options, work_queue, report_queue):
         src, dst = work_queue.get()
         try:
             convert_image(options, src, dst)
+            src_md5 = get_file_md5(src) if options.metadata_path else None
+            dst_md5 = get_file_md5(dst) if options.metadata_path else None
         except Exception, error:
             report_queue.put(Failure(src, dst, error))
         else:
-            report_queue.put(Success(src, dst))
+            report_queue.put(Success(src, dst, src_md5, dst_md5))
         work_queue.task_done()
 
-def reporter(options, report_queue):
+def reporter(options, report_queue, metadata):
     success = 0
     failure = 0
     pv = None
@@ -98,6 +114,7 @@ def reporter(options, report_queue):
             pv.stdin.write(' ')
         if isinstance(msg, Success):
             success += 1
+            metadata.append({'src': msg.src, 'dst': msg.dst, 'src_md5': msg.src_md5, 'dst_md5': msg.dst_md5})
         if isinstance(msg, Failure):
             failure += 1
             print(msg)
@@ -113,16 +130,17 @@ def main(options):
     work_queue = Queue()
     report_queue = Queue()
 
+    metadata = []
     for index in range(options.parallel):
         start_thread(worker, options, work_queue, report_queue)
-    start_thread(reporter, options, report_queue)
+    start_thread(reporter, options, report_queue, metadata)
 
     total = 0
     for directory, subdirectories, filenames in os.walk(options.src):
         src_dir = os.path.join(options.src, directory)
         dst_dir = os.path.join(options.dst, os.path.relpath(src_dir, options.src))
         for filename in filenames:
-            if not options.allow_whitelist.match(filename):
+            if not options.allow_whitelist.search(filename):
                 continue
             if not os.path.isdir(dst_dir):
                 os.makedirs(dst_dir)
@@ -139,6 +157,10 @@ def main(options):
         report_queue.join()
     except KeyboardInterrupt:
         pass
+
+    if options.metadata_path:
+        with open(options.metadata_path, 'w') as handle:
+            json.dump(metadata, handle)
 
 if __name__ == '__main__':
     main(parse_arguments(sys.argv))
