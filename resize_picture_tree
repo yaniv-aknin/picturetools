@@ -2,15 +2,16 @@
 
 from __future__ import print_function
 
-import multiprocessing
-import os
-import sys
-import argparse
-import re
-import json
-from threading import Thread
 from Queue import Queue
 from subprocess import Popen, PIPE
+from threading import Thread
+import argparse
+import errno
+import json
+import multiprocessing
+import os
+import re
+import sys
 
 devnull = open('/dev/null', 'w')
 
@@ -56,6 +57,8 @@ def parse_arguments(argv):
     parser.add_argument('--allow-whitelist', default='\.(jpg)$')
     parser.add_argument('--allow-whitelist-case-sensitive', default=False, action='store_true')
     parser.add_argument('--metadata-path', default='.metadata.json')
+    parser.add_argument('--src-md5-links', default=None)
+    parser.add_argument('--src-md5-hardlinks', default=False, action='store_true')
     parser.add_argument('src')
     parser.add_argument('dst')
     options = parser.parse_args(argv[1:])
@@ -97,6 +100,13 @@ def worker(options, work_queue, report_queue):
         try:
             convert_image(options, src, dst)
             src_md5 = get_file_md5(src) if options.metadata_path else None
+            if options.src_md5_links:
+                action = os.link if options.src_md5_hardlinks else os.symlink
+                try:
+                    action(src, os.path.join(options.src_md5_links, src_md5))
+                except OSError, error:
+                    if errno.EEXIST != error.errno:
+                        raise
             dst_md5 = get_file_md5(dst) if options.metadata_path else None
         except Exception, error:
             report_queue.put(Failure(src, dst, error))
@@ -130,6 +140,9 @@ def main(options):
     work_queue = Queue()
     report_queue = Queue()
 
+    if options.src_md5_links and not os.path.isdir(options.src_md5_links):
+        os.makedirs(options.src_md5_links)
+
     metadata = []
     for index in range(options.parallel):
         start_thread(worker, options, work_queue, report_queue)
@@ -160,7 +173,7 @@ def main(options):
 
     if options.metadata_path:
         with open(options.metadata_path, 'w') as handle:
-            json.dump(metadata, handle)
+            json.dump(metadata, handle, indent=4)
 
 if __name__ == '__main__':
     main(parse_arguments(sys.argv))
