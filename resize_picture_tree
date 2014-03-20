@@ -1,5 +1,10 @@
 #!/usr/bin/env python
 
+"""Simple utility to resize multiple pictures recursively and concurrently.
+
+In addition to resizing the pictures, this utility will also write a JSON metadata file; for every resized file, the src and dst paths as well as the src and dst md5 will be recorded.
+"""
+
 from __future__ import print_function
 
 from Queue import Queue
@@ -49,7 +54,7 @@ class ToolError(Exception):
         return self.tool_stderr
 
 def parse_arguments(argv):
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--parallel', default=None, type=int)
     parser.add_argument('--size', default='1920x1200')
     parser.add_argument('--overwrite', default=False, action='store_true')
@@ -129,6 +134,7 @@ def reporter(options, report_queue, metadata):
             failure += 1
             print(msg)
         if isinstance(msg, Estimate):
+            assert pv is None, 'unexpected second estimate'
             pv = Popen(['pv', '--progress', '--timer', '--eta', '--average-rate', '--bytes',
                         '--size', str(msg.total - success - failure)], stdin=PIPE, stdout=devnull)
         report_queue.task_done()
